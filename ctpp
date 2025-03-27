@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+import os
+import re
+
+parser = argparse.ArgumentParser(description='c template preprocessor')
+parser.add_argument('inputFile', type=str, help='Input file')
+parser.add_argument('-o', dest="outputFile", type=str, required=True, help='Output file')
+args = parser.parse_args()
+
+def split_unescaped_spaces(text):
+    return re.split(r'(?<!\\) ', text)
+
+def c_type_safe(name):
+    name = re.sub(r'\*+', lambda m: '_ptr' * len(m.group()), name)
+    name = name.replace(' ', '_')
+    name = re.sub(r'[^a-zA-Z0-9_]', '', name)    
+    return name
+
+
+class Template:
+    def __init__(self, placeholders):
+        self.placeholders = placeholders
+        self.content = ''
+        
+    def apply(self, replacements):
+        ret = self.content
+        for ph, rep in zip(self.placeholders, replacements):
+            ret = ret.replace('$'+ph, rep)
+            ret = ret.replace('@'+c_type_safe(ph), '_'+c_type_safe(rep))
+        return ret
+
+class TemplateProcessor:
+    def __init__(self, filename):
+        self.filename = filename
+        self.templates = {}
+        self.needed = {}
+        
+    def parse_pass1(self, lines):
+        text_buffer = ''
+        template_name = ''
+        for l in lines:
+            pl = split_unescaped_spaces(l.strip())
+            if not len(pl) > 0:
+                text_buffer += l
+                continue
+            if pl[0] == '@template':
+                self.templates[pl[-1]] = Template(pl[1:-1])
+                template_name = pl[-1]
+                text_buffer += l
+            elif pl[0] == '@endtemplate':
+                template_name = ''
+            elif template_name != '':
+                self.templates[template_name].content += l
+            elif pl[0] == '@needs':
+                self.needed.setdefault(pl[-1], set()).add(tuple(pl[1:-1]))
+            else:
+                text_buffer += l
+        return text_buffer
+
+    def parse_pass(self, lines):
+        text_buffer = ''
+        template_name = ''
+        for l in lines:
+            pl = split_unescaped_spaces(l.strip())
+            if not len(pl) > 0:
+                text_buffer += l
+                continue
+            if pl[0] == '@template':
+                text_buffer += l
+            elif pl[0] == '@needs':
+                self.needed.setdefault(pl[-1], set()).add(tuple(pl[1:-1]))
+            else:
+                text_buffer += l
+        return text_buffer
+
+    def parse_file(self):
+        if not os.path.exists(self.filename):
+            print(f"Error: File '{self.filename}' not found.", file=sys.stderr)
+            sys.exit(1)
+        with open(self.filename, "r") as f:
+            lines = f.readlines()
+        file_buffer = self.parse_pass1(lines)
+        for template_name, replacements in self.needed.items():
+            template_txt = '\n'.join(self.templates[template_name].apply(rep) for rep in replacements)
+            template_macro = f'@template {' '.join(self.templates[template_name].placeholders)} {template_name}'
+            file_buffer = file_buffer.replace(template_macro, template_txt)
+        while len(self.needed) > 0:
+            self.needed = {}
+            file_buffer = self.parse_pass(file_buffer.splitlines(keepends=True))
+            for template_name, replacements in self.needed.items():
+                template_txt = '\n'.join(self.templates[template_name].apply(rep) for rep in replacements)
+                template_macro = f'@template {self.templates[template_name].placeholder} {template_name}'
+                file_buffer = file_buffer.replace(template_macro, template_txt)
+        return file_buffer
+
+input_filename = args.inputFile
+tp = TemplateProcessor(input_filename)
+
+output_filename = args.outputFile
+result = tp.parse_file() or ''
+with open(output_filename, "w") as f:
+    f.write(result)
